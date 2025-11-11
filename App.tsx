@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback } from 'react';
 import Header from './components/Header';
 import Watchlist from './components/Watchlist';
@@ -13,7 +14,7 @@ import StockComparisonModal from './components/StockComparisonModal';
 import SettingsModal from './components/SettingsModal';
 import AIComprehensiveAnalysis from './components/AIComprehensiveAnalysis';
 import { getTradingAnalysis, getComprehensiveCompanyAnalysis } from './services/geminiService';
-import { fetchStockData, fetchCurrentStockInfo, simulateRealTimeUpdate } from './services/stockService';
+import { fetchStockData, fetchCurrentStockInfo } from './services/stockService';
 import { fetchNews } from './services/newsService';
 import { fetchCompanyProfile } from './services/companyService';
 import { Stock, StockInfo, StockDataPoint, AIAnalysisResult, Trade, PortfolioSummary, PortfolioPosition, PriceAlert, NotificationMessage, NewsArticle, CompanyProfile as CompanyProfileType, PortfolioHistoryPoint, ComparisonDataPoint, AIComprehensiveAnalysisResult, TechnicalIndicator } from './types';
@@ -88,15 +89,13 @@ const AppContent: React.FC = () => {
     const [selectedStock, setSelectedStock] = useState<string>(STOCKS[0].ticker);
 
     const [stockData, setStockData] = useState<StockDataPoint[]>([]);
-    const [stockInfo, setStockInfo] = useState<StockInfo | null>(null);
+    const [watchlistData, setWatchlistData] = useState<Map<string, StockInfo>>(new Map());
     const [isStockDataLoading, setIsStockDataLoading] = useState<boolean>(true);
     const [stockDataError, setStockDataError] = useState<string | null>(null);
 
     const [aiAnalysis, setAiAnalysis] = useState<AIAnalysisResult | null>(null);
     const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
     const [analysisError, setAnalysisError] = useState<string | null>(null);
-    
-    const [updates, setUpdates] = useState(0);
 
     const [trades, setTrades] = useState<Trade[]>([]);
     const [portfolioSummary, setPortfolioSummary] = useState<PortfolioSummary | null>(null);
@@ -115,23 +114,21 @@ const AppContent: React.FC = () => {
 
     const [activeInfoTab, setActiveInfoTab] = useState<'news' | 'profile' | 'analysis'>('news');
 
-    // State for comparison feature
     const [isCompareModalOpen, setIsCompareModalOpen] = useState(false);
     const [comparisonData, setComparisonData] = useState<ComparisonDataPoint[] | null>(null);
     const [comparisonTickers, setComparisonTickers] = useState<string[]>([]);
     const [isComparing, setIsComparing] = useState(false);
     const [compareError, setCompareError] = useState<string | null>(null);
 
-    // State for comprehensive analysis
     const [comprehensiveAnalysis, setComprehensiveAnalysis] = useState<AIComprehensiveAnalysisResult | null>(null);
     const [isAnalyzingComprehensive, setIsAnalyzingComprehensive] = useState<boolean>(false);
     const [comprehensiveAnalysisError, setComprehensiveAnalysisError] = useState<string | null>(null);
 
-    // State for AI analysis indicator selection
     const [selectedIndicators, setSelectedIndicators] = useState<Set<TechnicalIndicator>>(
         new Set(['sma10', 'sma50', 'rsi', 'macd'])
     );
 
+    const stockInfo = watchlistData.get(selectedStock) || null;
 
     const handleSelectStock = useCallback((ticker: string) => {
         setSelectedStock(ticker);
@@ -145,7 +142,10 @@ const AppContent: React.FC = () => {
     const handleAddStock = (ticker: string) => {
         const upperTicker = ticker.toUpperCase();
         if (!watchlistStocks.some(s => s.ticker === upperTicker)) {
-            setWatchlistStocks(prev => [...prev, { ticker: upperTicker, name: `${upperTicker}`, currency: 'USD' }]); // Default new adds to USD
+            // Detect currency based on ticker format
+            const isCNY = /^(60|00|30)/.test(upperTicker);
+            const currency: 'USD' | 'CNY' = isCNY ? 'CNY' : 'USD';
+            setWatchlistStocks(prev => [...prev, { ticker: upperTicker, name: `${upperTicker}`, currency: currency }]); 
         }
         handleSelectStock(upperTicker);
     };
@@ -271,7 +271,7 @@ const AppContent: React.FC = () => {
         } catch (error) {
             console.error("Error fetching comparison data:", error);
             setCompareError(t('compare.error'));
-            setComparisonData(null); // Ensure data is null on error
+            setComparisonData(null); 
         } finally {
             setIsComparing(false);
         }
@@ -284,117 +284,86 @@ const AppContent: React.FC = () => {
     };
 
     useEffect(() => {
-        const fetchData = async () => {
+        const fetchDeepData = async () => {
+            if (!selectedStock) return;
+
             setIsStockDataLoading(true);
             setStockDataError(null);
-            try {
-                const [data, info] = await Promise.all([
-                    fetchStockData(selectedStock),
-                    fetchCurrentStockInfo(selectedStock)
-                ]);
-                setStockData(data);
-                setStockInfo(info);
-
-                // Fetch profile
-                setIsFetchingProfile(true);
-                setProfileError(null);
-                try {
-                    const profile = await fetchCompanyProfile(info.ticker, info.name);
-                    setCompanyProfile(profile);
-                } catch (error) {
-                    setProfileError("Failed to fetch company profile.");
-                } finally {
-                    setIsFetchingProfile(false);
-                }
-            } catch (error) {
-                console.error("Error fetching stock data:", error);
-                setStockDataError(t('stockChart.error'));
-                setStockData([]);
-                setStockInfo(null);
-            } finally {
-                setIsStockDataLoading(false);
-            }
-        };
-        fetchData();
-    }, [selectedStock, updates, t]);
-
-    useEffect(() => {
-        const fetchNewsData = async () => {
             setIsFetchingNews(true);
             setNewsError(null);
-            setNews([]);
+            setIsFetchingProfile(true);
+            setProfileError(null);
+
             try {
-                const articles = await fetchNews(selectedStock);
+                // Fetch chart data, news, and profile in parallel
+                const [data, articles, profile] = await Promise.all([
+                    fetchStockData(selectedStock),
+                    fetchNews(selectedStock),
+                    fetchCompanyProfile(selectedStock, STOCKS.find(s => s.ticker === selectedStock)?.name || selectedStock)
+                ]);
+                setStockData(data);
                 setNews(articles);
+                setCompanyProfile(profile);
             } catch (error) {
-                setNewsError("Failed to fetch news articles.");
-                console.error("Error fetching news:", error);
+                const errorMessage = error instanceof Error ? error.message : t('stockChart.error');
+                setStockDataError(errorMessage);
+                setStockData([]);
+                setNews([]);
+                setNewsError("Failed to fetch news.");
+                setCompanyProfile(null);
+                setProfileError("Failed to fetch profile.");
             } finally {
+                setIsStockDataLoading(false);
                 setIsFetchingNews(false);
+                setIsFetchingProfile(false);
             }
         };
-        fetchNewsData();
-    }, [selectedStock]);
+        fetchDeepData();
+    }, [selectedStock, t]);
 
+    // Fetch watchlist data sequentially on initial load to avoid rate limiting.
     useEffect(() => {
-        const intervalId = setInterval(() => {
-            simulateRealTimeUpdate();
-            setUpdates(prev => prev + 1);
-        }, 5000);
-        return () => clearInterval(intervalId);
-    }, []);
+        let isCancelled = false;
+        const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-    useEffect(() => {
-        const checkAlerts = async () => {
-            const activeAlerts = alerts.filter(a => a.status === 'active');
-            if (activeAlerts.length === 0) return;
-
-            const tickersToCheck = [...new Set(activeAlerts.map(a => a.ticker))];
-            const pricePromises = tickersToCheck.map(ticker => fetchCurrentStockInfo(ticker).catch(() => null));
-            const priceInfos = await Promise.all(pricePromises);
+        const fetchInitialWatchlistData = async () => {
+            console.log("Fetching initial data for watchlist sequentially to respect rate limits...");
             
-            const pricesMap = new Map<string, number>();
-            priceInfos.forEach(info => {
-                if (info) pricesMap.set(info.ticker, info.price);
-            });
+            for (const stock of watchlistStocks) {
+                if (isCancelled) break;
 
-            const triggeredAlerts: string[] = [];
-            activeAlerts.forEach(alert => {
-                const currentPrice = pricesMap.get(alert.ticker);
-                if (currentPrice === undefined) return;
-
-                const conditionMet = 
-                    (alert.condition === 'above' && currentPrice >= alert.targetPrice) ||
-                    (alert.condition === 'below' && currentPrice <= alert.targetPrice);
-
-                if (conditionMet) {
-                    triggeredAlerts.push(alert.id);
-                    const newNotification: NotificationMessage = {
-                        id: `notif-${alert.id}`,
-                        message: t('notifications.alertMessage', {
-                            ticker: alert.ticker,
-                            condition: t(`alerts.${alert.condition}`),
-                            targetPrice: alert.targetPrice.toFixed(2),
-                            currentPrice: currentPrice.toFixed(2),
-                        }),
-                        type: 'info'
-                    };
-                    setNotifications(prev => [...prev.filter(n => n.id !== newNotification.id), newNotification]);
+                try {
+                    const info = await fetchCurrentStockInfo(stock.ticker);
+                    if (!isCancelled) {
+                        setWatchlistData(prevMap => new Map(prevMap).set(info.ticker, info));
+                    }
+                } catch (error) {
+                    console.error(`Initial fetch failed for ${stock.ticker}:`, error instanceof Error ? error.message : String(error));
+                    if (!isCancelled) {
+                        // Set dummy data on failure to prevent UI from breaking
+                        setWatchlistData(prevMap => new Map(prevMap).set(stock.ticker, {
+                            ticker: stock.ticker, name: stock.name, currency: stock.currency,
+                            price: 0, change: 0, changePercent: 0, volume: '0', marketCap: 'N/A',
+                            open: 0, high: 0, low: 0,
+                        }));
+                    }
                 }
-            });
-
-            if (triggeredAlerts.length > 0) {
-                setAlerts(prevAlerts => 
-                    prevAlerts.map(alert => 
-                        triggeredAlerts.includes(alert.id) ? { ...alert, status: 'triggered' } : alert
-                    )
-                );
+                
+                // Wait for 13 seconds before the next request to stay under the 5 requests/minute limit.
+                if (!isCancelled) {
+                    await delay(13000);
+                }
             }
         };
-        checkAlerts();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [updates, t]);
-    
+
+        fetchInitialWatchlistData();
+
+        return () => {
+           isCancelled = true;
+        };
+    }, [watchlistStocks]);
+
+
     const calculatePortfolio = useCallback(async (currentTrades: Trade[]): Promise<PortfolioSummary | null> => {
         if (currentTrades.length === 0) {
             return { totalValue: 0, totalGainLoss: 0, totalGainLossPercent: 0, positions: [] };
@@ -428,7 +397,7 @@ const AppContent: React.FC = () => {
                 const averageCost = posData.cost / posData.shares, totalGainLoss = currentValue - posData.cost;
                 const totalGainLossPercent = posData.cost > 0 ? (totalGainLoss / posData.cost) * 100 : 0;
                 positions.push({ ticker, name: currentInfo.name, shares: posData.shares, averageCost, currentPrice, currentValue, totalGainLoss, totalGainLossPercent, currency: currentInfo.currency });
-                totalValue += currentValue; // Note: Not converting currencies for total value
+                totalValue += currentValue; 
                 totalCost += posData.cost;
             }
             const totalGainLoss = totalValue - totalCost;
@@ -448,13 +417,15 @@ const AppContent: React.FC = () => {
                 const newPoint: PortfolioHistoryPoint = { time: new Date().toISOString(), value: summary.totalValue };
                 setHistoricalPortfolioData(prev => {
                     const newData = [...prev, newPoint];
-                    // Prune old data to prevent performance degradation
                     return newData.length > 500 ? newData.slice(newData.length - 500) : newData;
                 });
             }
         };
-        updateAndLogPortfolio();
-    }, [trades, updates, calculatePortfolio]);
+        const portfolioInterval = setInterval(updateAndLogPortfolio, 60000); // Recalculate portfolio every minute
+        updateAndLogPortfolio(); // Initial calculation
+
+        return () => clearInterval(portfolioInterval);
+    }, [trades, calculatePortfolio]);
 
     const InfoTabButton: React.FC<{
         label: string;
@@ -484,10 +455,10 @@ const AppContent: React.FC = () => {
                         <div className="flex-shrink-0 flex flex-col w-64 border-r border-gray-700">
                            <Watchlist
                                 stocks={watchlistStocks}
+                                stockInfos={Array.from(watchlistData.values())}
                                 selectedStock={selectedStock}
                                 onSelectStock={handleSelectStock}
                                 onAddStock={handleAddStock}
-                                updates={updates}
                                 onCompare={handleCompareStocks}
                                 isComparing={isComparing && isCompareModalOpen}
                             />

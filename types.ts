@@ -33,6 +33,16 @@ export interface StockInfo {
   currency: 'USD' | 'CNY';
 }
 
+// FIX: Added missing StockQuote interface required by stockService.ts
+export interface StockQuote {
+  price: number;
+  change: number;
+  changePercent: number;
+  volume: string;
+  high: number;
+  low: number;
+}
+
 export interface AIAnalysisResult {
   signal: 'BUY' | 'SELL' | 'HOLD';
   confidence: number;

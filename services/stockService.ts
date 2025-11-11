@@ -1,147 +1,157 @@
-import { StockDataPoint, StockInfo, Stock } from '../types';
+import { StockDataPoint, StockInfo, StockQuote } from '../types';
 import { STOCKS } from '../constants';
 
-const formatMarketCap = (value: number): string => {
-    if (value >= 1e12) {
-        return `${(value / 1e12).toFixed(2)}T`;
-    }
-    if (value >= 1e9) {
-        return `${(value / 1e9).toFixed(2)}B`;
-    }
-    if (value >= 1e6) {
-        return `${(value / 1e6).toFixed(2)}M`;
-    }
-    return value.toString();
-};
+const API_KEY = '3D98TA15C9BWNHQL';
+const BASE_URL = 'https://www.alphavantage.co/query';
 
-const generateHistoricalData = (basePrice: number): StockDataPoint[] => {
-  const data: StockDataPoint[] = [];
-  let currentPrice = basePrice;
-  const now = new Date();
+// --- CACHE HELPERS ---
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
-  for (let i = 100; i > 0; i--) {
-    const time = new Date(now.getTime() - i * 60 * 60 * 1000); // Hourly data for past 100 hours
-    const change = (Math.random() - 0.5) * (basePrice * 0.01);
-    currentPrice += change;
-    currentPrice = Math.max(currentPrice, 10); // Ensure price doesn't go too low
-    data.push({ 
-        time: time.toISOString(), 
-        price: parseFloat(currentPrice.toFixed(2)),
-        volume: Math.floor(Math.random() * 2000000 + 500000)
-    });
-  }
-  return data;
-};
-
-const basePrices: { [key: string]: number } = {
-  'AAPL': 170,
-  'GOOGL': 140,
-  'MSFT': 380,
-  'AMZN': 150,
-  'TSLA': 240,
-  'NVDA': 500,
-  'META': 330,
-  'JPM': 155,
-  '600519': 1550,
-  '601318': 42,
-  '300750': 195,
-  '002594': 245,
-};
-
-let simulatedStockData: { [key: string]: { info: StockInfo, historical: StockDataPoint[] } } = {};
-
-const initializeStock = (stock: Stock) => {
-    const basePrice = basePrices[stock.ticker] || (Math.random() * 450 + 50);
-    const historical = generateHistoricalData(basePrice);
-    const currentPrice = historical[historical.length - 1].price;
-    const openPrice = historical[historical.length - 24]?.price || currentPrice * 0.99;
-    const change = currentPrice - openPrice;
-    const changePercent = (change / openPrice) * 100;
-
-    // More realistic market cap simulation. Correlate it slightly with price.
-    // Simulate shares outstanding between 1B and 15B.
-    const sharesOutstanding = Math.random() * 14e9 + 1e9;
-    const marketCapValue = currentPrice * sharesOutstanding;
-
-    simulatedStockData[stock.ticker] = {
-        historical,
-        info: {
-            ticker: stock.ticker,
-            name: stock.name,
-            price: parseFloat(currentPrice.toFixed(2)),
-            change: parseFloat(change.toFixed(2)),
-            changePercent: parseFloat(changePercent.toFixed(2)),
-            volume: `${(Math.random() * 50 + 20).toFixed(2)}M`,
-            marketCap: formatMarketCap(marketCapValue),
-            open: parseFloat(openPrice.toFixed(2)),
-            high: Math.max(...historical.slice(-24).map(p => p.price)),
-            low: Math.min(...historical.slice(-24).map(p => p.price)),
-            currency: stock.currency,
+const getFromCache = <T>(key: string): T | null => {
+    try {
+        const itemStr = localStorage.getItem(key);
+        if (!itemStr) return null;
+        
+        const item = JSON.parse(itemStr);
+        const now = new Date().getTime();
+        
+        if (now > item.timestamp + CACHE_TTL_MS) {
+            localStorage.removeItem(key);
+            return null;
         }
+        return item.data;
+    } catch (error) {
+        console.error("Error reading from cache:", error);
+        return null;
     }
-}
+};
 
-STOCKS.forEach(initializeStock);
+const setInCache = <T>(key: string, data: T): void => {
+    try {
+        const item = {
+            data,
+            timestamp: new Date().getTime()
+        };
+        localStorage.setItem(key, JSON.stringify(item));
+    } catch (error) {
+        console.error("Error writing to cache:", error);
+    }
+};
+// --- END CACHE HELPERS ---
 
+// Helper to handle API responses and errors, including rate limiting notes
+const handleApiResponse = async (response: Response) => {
+    if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+    }
+    const data = await response.json();
+    if (data.Note && data.Note.includes('API call frequency')) {
+        throw new Error('API rate limit reached. Please try again later.');
+    }
+    if (data['Error Message']) {
+        throw new Error(`API Error: ${data['Error Message']}`);
+    }
+    return data;
+};
+
+// Helper to format ticker for Alpha Vantage API (e.g., adding .SS for Shanghai)
+const getApiTicker = (ticker: string): string => {
+    if (['600519', '601318'].includes(ticker)) return `${ticker}.SS`;
+    if (['300750', '002594'].includes(ticker)) return `${ticker}.SZ`;
+    return ticker;
+};
+
+// Internal function to fetch quote data to avoid code duplication
+const fetchQuoteInternal = async (ticker: string): Promise<any> => {
+    const cacheKey = `cache_alphavantage_quote_${ticker}`;
+    const cachedData = getFromCache<any>(cacheKey);
+    if (cachedData) {
+        return cachedData;
+    }
+
+    const apiTicker = getApiTicker(ticker);
+    const url = `${BASE_URL}?function=GLOBAL_QUOTE&symbol=${apiTicker}&apikey=${API_KEY}`;
+    const response = await fetch(url);
+    const data = await handleApiResponse(response);
+    
+    const quoteData = data['Global Quote'];
+    if (!quoteData || Object.keys(quoteData).length === 0) {
+        throw new Error('No quote data found. The ticker may be invalid or the daily API limit has been reached.');
+    }
+
+    setInCache(cacheKey, quoteData);
+    return quoteData;
+};
+
+/**
+ * Fetches historical intraday (60min) stock data.
+ */
 export const fetchStockData = async (ticker: string): Promise<StockDataPoint[]> => {
-  if (!simulatedStockData[ticker]) {
-      let stock = STOCKS.find(s => s.ticker === ticker);
-      if(!stock) {
-        stock = { ticker, name: `${ticker} (Custom)`, currency: 'USD' };
-      }
-      initializeStock(stock);
-  }
-  return Promise.resolve([...simulatedStockData[ticker].historical]);
-};
-
-export const fetchCurrentStockInfo = async (ticker: string): Promise<StockInfo> => {
-    if (!simulatedStockData[ticker]) {
-        let stock = STOCKS.find(s => s.ticker === ticker);
-        if(!stock) {
-            stock = { ticker, name: `${ticker} (Custom)`, currency: 'USD' };
-        }
-        initializeStock(stock);
+    const cacheKey = `cache_alphavantage_data_${ticker}`;
+    const cachedData = getFromCache<StockDataPoint[]>(cacheKey);
+    if (cachedData) {
+        return cachedData;
     }
-  return Promise.resolve({...simulatedStockData[ticker].info});
+
+    const apiTicker = getApiTicker(ticker);
+    const url = `${BASE_URL}?function=TIME_SERIES_INTRADAY&symbol=${apiTicker}&interval=60min&outputsize=compact&apikey=${API_KEY}`;
+    const response = await fetch(url);
+    const data = await handleApiResponse(response);
+    
+    const timeSeries = data['Time Series (60min)'];
+    if (!timeSeries) {
+        throw new Error('No time series data found for chart. The ticker may be invalid or the daily API limit has been reached.');
+    }
+
+    // Parse the API response object into an array of data points and sort chronologically
+    const dataPoints: StockDataPoint[] = Object.entries(timeSeries)
+        .map(([time, values]: [string, any]) => ({
+            time: new Date(time).toISOString(),
+            price: parseFloat(values['4. close']),
+            volume: parseInt(values['5. volume'], 10),
+        }))
+        .reverse(); 
+
+    setInCache(cacheKey, dataPoints);
+    return dataPoints;
 };
 
-export const simulateRealTimeUpdate = (): void => {
-    Object.keys(simulatedStockData).forEach(ticker => {
-        const currentStock = simulatedStockData[ticker];
-        const lastDataPoint = currentStock.historical[currentStock.historical.length - 1];
-        const lastPrice = lastDataPoint.price;
-        const change = (Math.random() - 0.5) * (lastPrice * 0.001);
-        const newPrice = parseFloat((lastPrice + change).toFixed(2));
-        const newVolume = Math.max(50000, Math.floor(lastDataPoint.volume * (0.95 + Math.random() * 0.1)));
+/**
+ * Fetches current stock information using the GLOBAL_QUOTE endpoint.
+ * Note: Market Cap is not available here and will be 'N/A'.
+ * The detailed CompanyProfile component will fetch this separately.
+ */
+export const fetchCurrentStockInfo = async (ticker: string): Promise<StockInfo> => {
+    const quoteData = await fetchQuoteInternal(ticker);
+    
+    const stockConstant = STOCKS.find(s => s.ticker === ticker);
 
-        // Create a new point for the historical data
-        const newPoint = { time: new Date().toISOString(), price: newPrice, volume: newVolume };
-        
-        // Create a new array for historical data using an immutable approach
-        let updatedHistorical = [...currentStock.historical, newPoint];
-        if (updatedHistorical.length > 200) {
-            // slice returns a new array, maintaining immutability
-            updatedHistorical = updatedHistorical.slice(1);
-        }
-        
-        const openPrice = currentStock.info.open;
-        const newChange = newPrice - openPrice;
-        const newChangePercent = (newChange / openPrice) * 100;
+    return {
+        ticker: quoteData['01. symbol'],
+        name: stockConstant?.name || ticker, // Fallback name
+        price: parseFloat(quoteData['05. price']),
+        change: parseFloat(quoteData['09. change']),
+        changePercent: parseFloat(quoteData['10. change percent'].replace('%', '')),
+        volume: quoteData['06. volume'],
+        marketCap: 'N/A', // Not available from GLOBAL_QUOTE; fetched in CompanyProfile
+        open: parseFloat(quoteData['02. open']),
+        high: parseFloat(quoteData['03. high']),
+        low: parseFloat(quoteData['04. low']),
+        currency: stockConstant?.currency || (ticker.match(/^(60|00|30)/) ? 'CNY' : 'USD'),
+    };
+};
 
-        // Create a new info object using an immutable approach
-        const updatedInfo = {
-            ...currentStock.info,
-            price: newPrice,
-            change: parseFloat(newChange.toFixed(2)),
-            changePercent: parseFloat(newChangePercent.toFixed(2)),
-            high: Math.max(currentStock.info.high, newPrice),
-            low: Math.min(currentStock.info.low, newPrice),
-        };
-
-        // Replace the old stock data with the new, immutable data
-        simulatedStockData[ticker] = {
-            info: updatedInfo,
-            historical: updatedHistorical,
-        };
-    });
+/**
+ * Fetches a lightweight quote for a stock, suitable for frequent updates (if rate limits allowed).
+ */
+export const fetchQuote = async (ticker: string): Promise<StockQuote> => {
+    const quoteData = await fetchQuoteInternal(ticker);
+    return {
+        price: parseFloat(quoteData['05. price']),
+        change: parseFloat(quoteData['09. change']),
+        changePercent: parseFloat(quoteData['10. change percent'].replace('%', '')),
+        volume: quoteData['06. volume'],
+        high: parseFloat(quoteData['03. high']),
+        low: parseFloat(quoteData['04. low']),
+    };
 };

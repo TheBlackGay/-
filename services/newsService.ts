@@ -1,77 +1,95 @@
 import { NewsArticle } from '../types';
-import { STOCKS } from '../constants';
 
-const newsTemplates = [
-  {
-    title: "{name} Announces Record Quarterly Earnings, Shares Surge",
-    summary: "In a recent press release, {name} reported quarterly earnings that exceeded analyst expectations, driven by strong sales in its flagship product division. The company's stock price saw a significant uptick in after-hours trading following the announcement.",
-    source: "MarketWatch",
-  },
-  {
-    title: "Analysts Upgrade {ticker} to 'Strong Buy' Amid Positive Market Outlook",
-    summary: "Leading financial analysts have upgraded their rating for {ticker}, citing a favorable macroeconomic environment and innovative product pipeline. The new price target suggests a potential 20% upside from its current valuation.",
-    source: "Reuters",
-  },
-  {
-    title: "New Product Launch from {name} Could Disrupt the Industry",
-    summary: "{name} has unveiled its latest product, which analysts believe could be a game-changer. The new offering boasts several innovative features that set it apart from competitors.",
-    source: "Bloomberg",
-  },
-  {
-    title: "Regulatory Scrutiny Looms Over {ticker} Following Recent Controversy",
-    summary: "Government regulators are reportedly investigating {name} over anticompetitive concerns. The news has caused some volatility in {ticker}'s stock price as investors await further details.",
-    source: "The Wall Street Journal",
-  },
-  {
-    title: "{name} Expands into New International Markets",
-    summary: "As part of its global growth strategy, {name} announced its expansion into several key emerging markets. The move is expected to significantly boost the company's revenue streams in the coming years.",
-    source: "Financial Times",
-  },
-  {
-    title: "Supply Chain Issues Continue to Impact {ticker}'s Production",
-    summary: "Persistent global supply chain disruptions are affecting production timelines for {name}. The company is actively seeking alternative suppliers to mitigate the impact on its quarterly output.",
-    source: "CNBC",
-  },
-  {
-    title: "CEO of {name} to Speak at Major Tech Conference",
-    summary: "The CEO of {name} is scheduled to deliver a keynote address at the upcoming Global Tech Summit, where they are expected to share insights on the future of the industry and the company's strategic direction.",
-    source: "TechCrunch",
-  }
-];
+const API_KEY = '3D98TA15C9BWNHQL';
+const BASE_URL = 'https://www.alphavantage.co/query';
 
-// Helper to shuffle an array
-const shuffleArray = <T>(array: T[]): T[] => {
-  const newArray = [...array];
-  for (let i = newArray.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
-  }
-  return newArray;
+// --- CACHE HELPERS ---
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+const getFromCache = <T>(key: string): T | null => {
+    try {
+        const itemStr = localStorage.getItem(key);
+        if (!itemStr) return null;
+        
+        const item = JSON.parse(itemStr);
+        const now = new Date().getTime();
+        
+        if (now > item.timestamp + CACHE_TTL_MS) {
+            localStorage.removeItem(key);
+            return null;
+        }
+        return item.data;
+    } catch (error) {
+        console.error("Error reading from cache:", error);
+        return null;
+    }
+};
+
+const setInCache = <T>(key: string, data: T): void => {
+    try {
+        const item = {
+            data,
+            timestamp: new Date().getTime()
+        };
+        localStorage.setItem(key, JSON.stringify(item));
+    } catch (error) {
+        console.error("Error writing to cache:", error);
+    }
+};
+// --- END CACHE HELPERS ---
+
+const handleApiResponse = async (response: Response) => {
+    if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}`);
+    }
+    const data = await response.json();
+    if (data.Note && data.Note.includes('API call frequency')) {
+        throw new Error('API rate limit reached. Please wait a minute and try again.');
+    }
+    if (data['Error Message']) {
+        throw new Error(`API Error: ${data['Error Message']}`);
+    }
+    return data;
+};
+
+const getApiTicker = (ticker: string): string => {
+    if (['600519', '601318'].includes(ticker)) return `${ticker}.SS`; // Shanghai
+    if (['300750', '002594'].includes(ticker)) return `${ticker}.SZ`; // Shenzhen
+    return ticker;
 };
 
 
 export const fetchNews = async (ticker: string): Promise<NewsArticle[]> => {
-  return new Promise(resolve => {
-    setTimeout(() => {
-      const stockInfo = STOCKS.find(s => s.ticker === ticker) || { ticker, name: ticker };
-      const { name } = stockInfo;
+  const cacheKey = `cache_alphavantage_news_${ticker}`;
+  const cachedData = getFromCache<NewsArticle[]>(cacheKey);
+  if (cachedData) {
+      return cachedData;
+  }
 
-      const shuffledTemplates = shuffleArray(newsTemplates);
-      const articleCount = Math.floor(Math.random() * 4) + 2; // 2 to 5 articles
+  const apiTicker = getApiTicker(ticker);
+  const url = `${BASE_URL}?function=NEWS_SENTIMENT&tickers=${apiTicker}&limit=20&apikey=${API_KEY}`;
+  const response = await fetch(url);
+  const data = await handleApiResponse(response);
 
-      const articles: NewsArticle[] = shuffledTemplates.slice(0, articleCount).map((template, index) => {
-        const publishedDate = new Date(Date.now() - index * 3 * 3600 * 1000 - Math.random() * 3600 * 1000); // Staggered publication times
-        return {
-          id: `${ticker}-${index}-${publishedDate.getTime()}`,
-          title: template.title.replace(/{name}|{ticker}/g, match => match === '{name}' ? name : ticker),
-          summary: template.summary.replace(/{name}|{ticker}/g, match => match === '{name}' ? name : ticker),
-          source: template.source,
-          url: '#', // Using a placeholder URL as it's a simulation
+  if (!data.feed || data.feed.length === 0) {
+    setInCache(cacheKey, []);
+    return [];
+  }
+
+  const articles = data.feed.map((article: any) => {
+      const publishedDate = new Date(
+          `${article.time_published.slice(0, 4)}-${article.time_published.slice(4, 6)}-${article.time_published.slice(6, 8)}T${article.time_published.slice(9, 11)}:${article.time_published.slice(11, 13)}:${article.time_published.slice(13, 15)}Z`
+      );
+      return {
+          id: article.url + article.time_published,
+          title: article.title,
+          summary: article.summary,
+          source: article.source,
+          url: article.url,
           publishedAt: publishedDate.toISOString(),
-        };
-      });
-
-      resolve(articles);
-    }, 800); // Simulate network delay
+      };
   });
+
+  setInCache(cacheKey, articles);
+  return articles;
 };

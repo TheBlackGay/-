@@ -1,25 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Stock, StockInfo } from '../types';
-import { fetchCurrentStockInfo } from '../services/stockService';
 import { ArrowUpIcon, ArrowDownIcon } from './IconComponents';
 import { useTranslations } from '../hooks/useTranslations';
 
 interface WatchlistProps {
   stocks: Stock[];
+  stockInfos: StockInfo[];
   selectedStock: string;
   onSelectStock: (ticker: string) => void;
   onAddStock: (ticker: string) => void;
-  updates: number;
   onCompare: (tickers: string[]) => void;
   isComparing: boolean;
 }
 
-interface WatchlistItemData extends StockInfo {
-    lastPrice?: number;
-}
-
 const WatchlistItem: React.FC<{
-  stockData: WatchlistItemData;
+  stockData: StockInfo;
   isSelected: boolean;
   onSelect: () => void;
   isSelectedForCompare: boolean;
@@ -27,19 +22,21 @@ const WatchlistItem: React.FC<{
 }> = ({ stockData, isSelected, onSelect, isSelectedForCompare, onToggleCompare }) => {
     const isUp = stockData.change >= 0;
     const [flashClass, setFlashClass] = useState('');
+    // FIX: Initialize `useRef` with `undefined` to satisfy TypeScript's expectation of an initial argument and correctly type the ref's `current` property as `number | undefined`.
+    const prevPriceRef = useRef<number | undefined>(undefined);
     
     const formatCurrency = (value: number, currency: 'USD' | 'CNY') => new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 
     useEffect(() => {
-        if(stockData.price !== stockData.lastPrice && stockData.lastPrice !== undefined) {
-            setFlashClass(stockData.price > stockData.lastPrice ? 'bg-green-500/30' : 'bg-red-500/30');
+        if (prevPriceRef.current !== undefined && stockData.price !== prevPriceRef.current) {
+            setFlashClass(stockData.price > prevPriceRef.current ? 'bg-green-500/30' : 'bg-red-500/30');
             const timer = setTimeout(() => setFlashClass(''), 300);
             return () => clearTimeout(timer);
         }
-    }, [stockData.price, stockData.lastPrice]);
+        prevPriceRef.current = stockData.price;
+    }, [stockData.price]);
     
     const handleContainerClick = (e: React.MouseEvent) => {
-        // Prevent row selection when clicking the checkbox input
         if ((e.target as HTMLElement).tagName.toLowerCase() === 'input') {
             return;
         }
@@ -108,73 +105,83 @@ const AddStockForm: React.FC<{ onAdd: (ticker: string) => void }> = ({ onAdd }) 
     );
 };
 
+const Watchlist: React.FC<WatchlistProps> = ({
+  stocks,
+  stockInfos,
+  selectedStock,
+  onSelectStock,
+  onAddStock,
+  onCompare,
+  isComparing,
+}) => {
+  const { t } = useTranslations();
+  const [compareSelection, setCompareSelection] = useState<Set<string>>(new Set());
+  
+  const handleToggleCompare = (ticker: string) => {
+      setCompareSelection(prev => {
+          const newSelection = new Set(prev);
+          if (newSelection.has(ticker)) {
+              newSelection.delete(ticker);
+          } else if (newSelection.size < 3) {
+              newSelection.add(ticker);
+          }
+          return newSelection;
+      });
+  };
 
-const Watchlist: React.FC<WatchlistProps> = ({ stocks, selectedStock, onSelectStock, onAddStock, updates, onCompare, isComparing }) => {
-    const { t } = useTranslations();
-    const [watchlistData, setWatchlistData] = useState<Map<string, WatchlistItemData>>(new Map());
-    const [comparisonSelection, setComparisonSelection] = useState<string[]>([]);
-
-    const handleSelectionChange = (ticker: string) => {
-        setComparisonSelection(prev => {
-            if (prev.includes(ticker)) {
-                return prev.filter(t => t !== ticker);
-            }
-            if (prev.length < 3) {
-                return [...prev, ticker];
-            }
-            // Logic to notify user about limit could be added here
-            return prev;
-        });
-    };
-
-    useEffect(() => {
-        const fetchWatchlistData = async () => {
-            const promises = stocks.map(stock => fetchCurrentStockInfo(stock.ticker));
-            const results = await Promise.all(promises);
-            const newWatchlistData = new Map<string, WatchlistItemData>();
-            results.forEach(info => {
-                const oldData = watchlistData.get(info.ticker);
-                newWatchlistData.set(info.ticker, {...info, lastPrice: oldData ? oldData.price : info.price});
-            });
-            setWatchlistData(newWatchlistData);
-        };
-
-        fetchWatchlistData();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [stocks, updates]);
+  const handleCompareClick = () => {
+    if (compareSelection.size >= 2) {
+      onCompare(Array.from(compareSelection));
+    }
+  };
 
   return (
-    <div className="bg-gray-800/50 flex flex-col flex-grow min-h-0">
-      <h2 className="text-lg font-semibold p-3 border-b border-gray-700 text-gray-300">{t('watchlist.title')}</h2>
+    <div className="flex-grow flex flex-col overflow-hidden">
+      <div className="p-3 border-b border-gray-700">
+        <h2 className="text-lg font-semibold text-gray-300">{t('watchlist.title')}</h2>
+      </div>
       <div className="flex-grow overflow-y-auto">
-        {stocks.map(stock => {
-            const data = watchlistData.get(stock.ticker);
-            return data ? (
-                <WatchlistItem
-                    key={stock.ticker}
-                    stockData={data}
-                    isSelected={selectedStock === stock.ticker}
-                    onSelect={() => onSelectStock(stock.ticker)}
-                    isSelectedForCompare={comparisonSelection.includes(stock.ticker)}
-                    onToggleCompare={handleSelectionChange}
-                />
-            ) : null;
+        {stocks.map((stock) => {
+          const info = stockInfos.find(i => i.ticker === stock.ticker);
+          if (info) {
+            return (
+              <WatchlistItem
+                key={info.ticker}
+                stockData={info}
+                isSelected={info.ticker === selectedStock}
+                onSelect={() => onSelectStock(info.ticker)}
+                isSelectedForCompare={compareSelection.has(info.ticker)}
+                onToggleCompare={handleToggleCompare}
+              />
+            );
+          }
+          // Placeholder for loading stocks
+          return (
+            <div key={stock.ticker} className="flex justify-between items-center p-3 opacity-50">
+              <div>
+                <p className="font-bold text-white">{stock.ticker}</p>
+                <p className="text-xs text-gray-400">{stock.name}</p>
+              </div>
+              <div className="text-xs text-gray-500">Loading...</div>
+            </div>
+          );
         })}
       </div>
-      <div className="p-3 border-t border-gray-700">
-        <button
-            onClick={() => {
-                onCompare(comparisonSelection);
-                setComparisonSelection([]); // Clear selection after initiating compare
-            }}
-            disabled={isComparing || comparisonSelection.length < 2 || comparisonSelection.length > 3}
-            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded transition-colors duration-200"
-        >
-            {isComparing ? t('compare.loading') : t('compare.button', { count: comparisonSelection.length })}
-        </button>
-        <p className="text-xs text-gray-500 text-center mt-2">{t('compare.helperText')}</p>
-        <AddStockForm onAdd={onAddStock} />
-      </div>
+       <div className="border-t border-gray-700">
+            <div className="p-3 space-y-2">
+                <button
+                    onClick={handleCompareClick}
+                    disabled={compareSelection.size < 2 || isComparing}
+                    className="w-full bg-gray-700 hover:bg-gray-600 disabled:bg-gray-700/50 disabled:cursor-not-allowed text-white font-semibold py-2 text-sm rounded transition-colors"
+                >
+                    {isComparing ? '...' : `${t('compare.button', { count: compareSelection.size })}`}
+                </button>
+                {compareSelection.size < 2 && (
+                    <p className="text-xs text-center text-gray-500">{t('compare.helperText')}</p>
+                )}
+            </div>
+            <AddStockForm onAdd={onAddStock} />
+       </div>
     </div>
   );
 };
